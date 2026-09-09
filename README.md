@@ -221,13 +221,77 @@ runs/<run_id>/target_<id>/shard_<n>/objective_reports.json
 Each `ObjectiveReport` carries `evidence` naming the SBR module, the raw metric,
 and the value it came from.
 
-## HPC scaling
+## HPC scaling — portable across supercomputers via Academy + Parsl
 
 Scoring is sharded by `(target_id, candidate_batch)` with `shard_size`, and each
-shard is an independent subprocess writing its own artifacts — the unit of work
-for a Slurm/PBS job array. Shard failure is isolated: `SbrSubprocessUnavailable`
-surfaces as `scoring_error` with the worker's stderr rather than a partial
-ranking.
+shard is an independent unit of work. Three backends satisfy the same interface
+and funnel through the one scoring core, so a report is identical whichever runs
+it:
+
+| backend | where shards run | use for |
+|---------|------------------|---------|
+| `subprocess` | one local process per shard (sequential) | isolation, crash-prone deps |
+| `in_process` | the host interpreter (sequential) | speed in a known-good env |
+| `academy_parsl` | **fanned out across a cluster via Parsl** | scale-out on HPC |
+
+### Why Academy
+
+The scale-out path is built on [Academy](https://academy-agents.org) (federated
+agents) + [Parsl](https://parsl.org). Academy separates the *exchange* (agent
+messaging) from the *executor* (placement), and Parsl separates the *task* from
+the *provider* (scheduler). The result: **the scoring code, the `ScoringAgent`,
+and the batch entrypoint never change between machines** — you only pick a Parsl
+config. Moving from a laptop to CINECA Leonardo to ALCF Polaris is one flag.
+
+- `binder_adapter/sbr_backends/academy_backend.py` — `AcademyScoringBackend`
+  wraps the shared `scoring.score_shard` as a Parsl `@python_app` and fans shards
+  out. A parity test proves its reports are byte-identical to the in-process
+  backend.
+- `binder_adapter/academy_agent.py` — `ScoringAgent`, a stateful Academy agent
+  exposing `score_and_select` / `capabilities` as `@action`s. It can run on a
+  login node today or be launched onto a remote Globus Compute endpoint later,
+  unchanged.
+- `examples/parsl_configs.py` — the ONE site-specific file. Ships `local`,
+  `leonardo` (Booster, 4×A100, SLURM), and `polaris` (4×A100, PBSPro) factories.
+  Add your machine by writing one more `Config` factory.
+
+### Running a scale-out campaign
+
+Generation is decoupled from scoring (compute nodes usually have no internet):
+an upstream step produces `candidates.jsonl`, then this entrypoint scores it at
+scale and writes a ranked result.
+
+```bash
+# laptop / login-node development
+python examples/run_academy_campaign.py \
+    --candidates candidates.jsonl \
+    --framework SQETFSDLWKLLPEN --target MDM2 \
+    --site local --out rankings.json
+
+# CINECA Leonardo Booster with GPU-resident MM-GBSA MD (same command, +flags)
+python examples/run_academy_campaign.py \
+    --candidates candidates.jsonl \
+    --framework SQETFSDLWKLLPEN --target MDM2 \
+    --site leonardo --md --md-platform CUDA \
+    --complex-pdb complex.pdb --out rankings.json
+```
+
+Shard failure is isolated: a failed Parsl task surfaces as an `ok: false` shard
+with `worker_errors` rather than a faked score or a corrupted ranking.
+
+### Deployment notes (real machines)
+
+- **Isolated env.** Install `academy-py` + `parsl` + the OpenMM/SBR stack in a
+  dedicated conda env or an Apptainer/Singularity image. (`academy-py>=1.0`
+  pulls `globus-sdk>=4`, which can conflict with other packages — don't share a
+  crowded base env.) Point Parsl `worker_init` at that same env so workers match
+  the login node.
+- **Storage.** Set `--artifact-dir` to `$SCRATCH`/`$FAST`, never `$HOME`.
+- **GPU MD.** Request GPU nodes in the provider, set `--md --md-platform CUDA`,
+  and the config pins one shard per GPU (`available_accelerators=4` on A100
+  nodes). Validate ΔG parity CPU-vs-CUDA on a known complex before large runs.
+- **Generation.** Run Jnana+ARGO on a login/service node (internet) or a local
+  vLLM on-cluster; feed the resulting `candidates.jsonl` to this entrypoint.
 
 ## Tests
 
@@ -235,11 +299,13 @@ ranking.
 PYTHONPATH=. python -m pytest tests/ -q
 ```
 
-52 tests. The integration tests (`test_sbr_integration.py`, `test_jnana_hook.py`,
+55 tests. The integration tests (`test_sbr_integration.py`, `test_jnana_hook.py`,
 `test_inprocess_backend.py`) execute the real StructBioReasoner scoring core and
 patch Jnana's real `RankingAgent`; `test_md_engine.py` runs the OpenMM MD
-pipeline on a synthetic 2-chain complex built in-process (no network). They skip
-automatically when a checkout / OpenMM is absent. Override locations with
+pipeline on a synthetic 2-chain complex built in-process (no network);
+`test_academy_backend.py` proves the Parsl fan-out backend produces reports
+identical to the in-process backend. They skip automatically when a checkout /
+OpenMM / academy+parsl is absent. Override locations with
 `BINDER_ADAPTER_SBR_ROOT` / `BINDER_ADAPTER_JNANA_ROOT`.
 
 ## Tier 2 (done) — in-process scoring

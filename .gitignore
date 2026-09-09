@@ -19,6 +19,9 @@ htmlcov/
 # Campaign run outputs (large, regenerable MD trajectories + results)
 runs/
 
+# Parsl run logs
+runinfo/
+
 # OS / editor
 .DS_Store
 *.swp
