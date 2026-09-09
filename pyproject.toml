@@ -1,2 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binder-adapter"
+version = "0.1.0"
+description = "Branch-aware integration making Jnana's tournament a realistic protein-binder design engine backed by StructBioReasoner, with portable Academy+Parsl HPC scale-out."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "acadev" }]
+
+# Core deps only. The heavy scientific stack (openmm/pdbfixer/mdtraj) is provided
+# by the conda layer in the Apptainer image and by the user's env otherwise, so
+# it is declared as an optional extra rather than forced here.
+dependencies = [
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+# Portable HPC scale-out (Academy + Parsl).
+hpc = [
+    "academy-py>=1.0",
+    "parsl>=2024.0",
+]
+# MD objectives (also available via conda-forge in the container).
+md = [
+    "openmm>=8.0",
+    "pdbfixer>=1.9",
+    "mdtraj>=1.9",
+    "numpy>=1.24,<2",
+]
+
+[project.scripts]
+binder-adapter = "binder_adapter.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["binder_adapter*"]
+
 [tool.pytest.ini_options]
 addopts = "-q"

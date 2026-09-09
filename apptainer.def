@@ -1,0 +1,122 @@
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.8
+
+# ============================================================================
+# binder-adapter portable HPC container
+# ============================================================================
+# A reproducible environment for running binder-adapter scoring at scale across
+# supercomputers (CINECA Leonardo, ALCF Polaris, NERSC, ...) via Academy + Parsl.
+#
+# What's INSIDE the image (pinned, reproducible):
+#   - Python 3.12 + the OpenMM/MM-GBSA MD stack (openmm, pdbfixer, mdtraj)
+#   - academy-py + parsl (portable scale-out) in an ISOLATED env, so the
+#     globus-sdk>=4 that academy-py pulls cannot clash with anything else
+#   - the binder_adapter package itself (pip install of this repo)
+#
+# What stays OUTSIDE and is BIND-MOUNTED at run time (they are evolving research
+# checkouts, not release deps):
+#   - StructBioReasoner  -> /opt/StructBioReasoner   (BINDER_ADAPTER_SBR_ROOT)
+#   - Jnana (optional)   -> /opt/Jnana               (BINDER_ADAPTER_JNANA_ROOT)
+#   - scratch / artifacts-> /scratch                 (--artifact-dir)
+#
+# BUILD (on a machine with apptainer; needs fakeroot or sudo):
+#   apptainer build binder-adapter.sif apptainer.def
+#
+# The pinned versions below mirror a known-good environment:
+#   academy-py 1.0.0, parsl 2026.2.9, openmm 8.3.1, pdbfixer 1.12.0,
+#   mdtraj 1.10.0, numpy 1.26.4, openai 2.7.2, python 3.12
+# ----------------------------------------------------------------------------
+
+%files
+    # Copy the adapter source into the image and pip-install it. Everything the
+    # container needs from THIS repo is baked in; SBR/Jnana are bind-mounted.
+    . /opt/binder-adapter
+
+%post
+    set -eux
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    eval "$(micromamba shell hook --shell bash)"
+
+    # --- MD + scale-out stack from conda-forge (OpenMM ships CUDA binaries) ---
+    micromamba create -y -n bad -c conda-forge \
+        python=3.12 \
+        "openmm=8.3.1" \
+        "pdbfixer=1.12.0" \
+        "mdtraj=1.10.0" \
+        "numpy=1.26.4" \
+        pip
+    micromamba clean -a -y
+
+    micromamba activate bad
+
+    # --- Python-only deps via pip (pinned) -----------------------------------
+    # academy-py pulls globus-sdk>=4; isolated in this env so nothing else cares.
+    pip install --no-cache-dir \
+        "academy-py==1.0.0" \
+        "parsl==2026.2.9" \
+        "openai==2.7.2"
+
+    # --- install the adapter itself (no deps: all satisfied above) -----------
+    pip install --no-cache-dir --no-deps /opt/binder-adapter
+
+    # sanity: the whole stack must import at build time or the build fails
+    python - <<'PY'
+import academy, parsl, openmm, pdbfixer, mdtraj, numpy, openai
+import binder_adapter
+from binder_adapter.sbr_backends.academy_backend import academy_available
+ok, why = academy_available()
+assert ok, why
+print("IMPORT OK:",
+      "academy", academy.__version__,
+      "parsl", parsl.__version__,
+      "openmm", openmm.__version__)
+PY
+
+%environment
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export PATH=/opt/conda/envs/bad/bin:$PATH
+    # Default bind-mount locations for the evolving research checkouts.
+    export BINDER_ADAPTER_SBR_ROOT=${BINDER_ADAPTER_SBR_ROOT:-/opt/StructBioReasoner}
+    export BINDER_ADAPTER_JNANA_ROOT=${BINDER_ADAPTER_JNANA_ROOT:-/opt/Jnana}
+    # Make bind-mounted checkouts importable without editing PYTHONPATH by hand.
+    export PYTHONPATH=${BINDER_ADAPTER_SBR_ROOT}:${BINDER_ADAPTER_JNANA_ROOT}:${PYTHONPATH:-}
+
+%runscript
+    # `apptainer run binder-adapter.sif <args>` -> the scale-out entrypoint.
+    exec python /opt/binder-adapter/examples/run_academy_campaign.py "$@"
+
+%test
+    # Runs during `apptainer build` (after %post) and via `apptainer test`.
+    export PATH=/opt/conda/envs/bad/bin:$PATH
+    python - <<'PY'
+import academy, parsl, openmm, binder_adapter
+from binder_adapter.sbr_backends.academy_backend import academy_available
+ok, why = academy_available()
+assert ok, f"academy/parsl unavailable: {why}"
+print("container self-test OK")
+PY
+
+%labels
+    Maintainer acadev
+    Project binder-adapter
+    Description Portable HPC scoring (Academy+Parsl+OpenMM) for protein binder design
+
+%help
+    binder-adapter portable HPC container.
+
+    Run a scale-out scoring campaign (bind-mount SBR + scratch):
+
+      apptainer run \
+        --bind /path/to/StructBioReasoner:/opt/StructBioReasoner \
+        --bind $SCRATCH:/scratch \
+        --nv \
+        binder-adapter.sif \
+          --candidates /scratch/candidates.jsonl \
+          --framework SQETFSDLWKLLPEN --target MDM2 \
+          --site leonardo --md --md-platform CUDA \
+          --artifact-dir /scratch/runs --out /scratch/rankings.json
+
+    --nv exposes the host NVIDIA driver for GPU-resident MM-GBSA MD.
+    Omit --md / use --site local for a CPU smoke run.
+
+    Self-test:  apptainer test binder-adapter.sif
