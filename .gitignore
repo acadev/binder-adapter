@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+*.so
+
+# Testing / caching
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Campaign run outputs (large, regenerable MD trajectories + results)
+runs/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Env
+.env
+.venv/
+venv/
